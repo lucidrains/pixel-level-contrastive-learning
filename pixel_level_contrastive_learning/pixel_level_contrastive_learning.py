@@ -2,6 +2,19 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
+class Projection(nn.Module):
+    def __init__(self, chan, inner_dim = 2048, chan_out = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(chan, inner_dim, 1),
+            nn.BatchNorm2d(inner_dim),
+            nn.ReLU(),
+            nn.Conv2d(inner_dim, chan_out, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
 class PPM(nn.Module):
     def __init__(
         self,
