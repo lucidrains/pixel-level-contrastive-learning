@@ -14,6 +14,9 @@ $ pip install pixel-level-contrastive-learning
 
 ## Usage
 
+Below is an example of how you would use the framework to self-supervise training of a resnet, taking the output of layer 4 (8 x 8 'pixels').
+
+
 ```python
 import torch
 from pixel_level_contrastive_learning import PixelCL
@@ -26,9 +29,9 @@ learner = PixelCL(
     resnet,
     image_size = 256,
     hidden_layer = 'layer4',        # leads to output of 8x8 feature map
-    projection_size = 256,
-    projection_hidden_size = 2048,
-    moving_average_decay = 0.99,
+    projection_size = 256,          # size of projection output, 256 was used in the paper
+    projection_hidden_size = 2048,  # size of projection hidden dimension, paper used 2048
+    moving_average_decay = 0.99,    # exponential moving average decay of target encoder
     ppm_num_layers = 1,             # number of layers for transform function in the pixel propagation module, 1 was optimal
     ppm_gamma = 2,                  # sharpness of the similarity in the pixel propagation module, already at optimal value of 2
     distance_thres = 0.1,           # (HELP!) the paper uses 0.7, but that leads to nearly all positive hits. need clarification on how the coordinates are normalized before distance calculation.
