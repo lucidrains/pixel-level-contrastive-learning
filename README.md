@@ -25,7 +25,7 @@ resnet = models.resnet50(pretrained=True)
 learner = PixelCL(
     resnet,
     image_size = 256,
-    hidden_layer = 'layer4',
+    hidden_layer = 'layer4',        # leads to output of 8x8 feature map
     projection_size = 256,
     projection_hidden_size = 2048,
     moving_average_decay = 0.99,
@@ -48,7 +48,7 @@ for _ in tqdm(range(100000)):
     loss.backward()
     print(loss.item())
     opt.step()
-    learner.update_moving_average() # update moving average of key encoder
+    learner.update_moving_average() # update moving average of target encoder
 
 # after much training, save the improved model for testing on downstream task
 torch.save(resnet, 'improved-resnet.pt')
