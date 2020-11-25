@@ -1,3 +1,4 @@
+import math
 import copy
 import random
 from functools import wraps
@@ -9,6 +10,8 @@ import torch.nn.functional as F
 
 from kornia import augmentation as augs
 from kornia import filters, color
+
+from einops import rearrange
 
 # helper functions
 
@@ -46,11 +49,12 @@ def cutout_coordinates(image, ratio_range = (0.5, 0.7)):
     coor_y = floor((orig_h - h) * random.random())
     return ((coor_y, coor_y + h), (coor_x, coor_x + w)), random_ratio
 
-def cutout_and_resize(image, coordinates):
+def cutout_and_resize(image, coordinates, output_size = None):
     shape = image.shape
+    output_size = default(output_size, shape[2:])
     (y0, y1), (x0, x1) = coordinates
     cutout_image = image[:, :, y0:y1, x0:x1]
-    return F.interpolate(cutout_image, size = shape[2:])
+    return F.interpolate(cutout_image, size = output_size)
 
 # augmentation utils
 
@@ -144,6 +148,7 @@ class NetWrapper(nn.Module):
         self.projection_hidden_size = projection_hidden_size
 
         self.hidden = None
+        self.hidden_shape = None
         self.hook_registered = False
 
     def _find_layer(self):
@@ -157,6 +162,7 @@ class NetWrapper(nn.Module):
 
     def _hook(self, _, __, output):
         self.hidden = output
+        self.hidden_shape = output.shape
 
     def _register_hook(self):
         layer = self._find_layer()
@@ -203,7 +209,10 @@ class PixelCL(nn.Module):
         augment_fn2 = None,
         moving_average_decay = 0.99,
         ppm_num_layers = 1,
-        ppm_gamma = 2
+        ppm_gamma = 2,
+        distance_thres = 0.1, # the paper uses 0.7, but that leads to nearly all positive hits. need clarification on how the coordinates are normalized before distance calculation.
+        similarity_temperature = 0.3,
+        alpha = 1.
     ):
         super().__init__()
 
@@ -225,6 +234,10 @@ class PixelCL(nn.Module):
 
         self.target_encoder = None
         self.target_ema_updater = EMA(moving_average_decay)
+
+        self.distance_thres = distance_thres
+        self.similarity_temperature = similarity_temperature
+        self.alpha = alpha
 
         self.propagate_pixels = PPM(
             chan = projection_size,
@@ -254,7 +267,7 @@ class PixelCL(nn.Module):
         update_moving_average(self.target_ema_updater, self.target_encoder, self.online_encoder)
 
     def forward(self, x):
-        shape = x.shape
+        shape, device = x.shape, x.device
         image_one, image_two = self.augment1(x), self.augment2(x)
 
         cutout_coordinates_one, _ = cutout_coordinates(x)
@@ -266,6 +279,32 @@ class PixelCL(nn.Module):
         proj_one = self.online_encoder(image_one_cutout)
         proj_two = self.online_encoder(image_two_cutout)
 
+        image_h, image_w = shape[2:]
+        proj_image_shape = proj_one.shape[2:]
+
+        coordinates = torch.meshgrid(
+            torch.arange(image_h, device = device),
+            torch.arange(image_w, device = device)
+        )
+
+        coordinates = torch.stack(coordinates).unsqueeze(0).float()
+        coordinates /= math.sqrt(image_h ** 2 + image_w ** 2)
+
+        proj_coors_one = cutout_and_resize(coordinates, cutout_coordinates_one, output_size = proj_image_shape)
+        proj_coors_two = cutout_and_resize(coordinates, cutout_coordinates_two, output_size = proj_image_shape)
+
+        proj_coors_one, proj_coors_two = map(lambda t: rearrange(t, 'b c h w -> (b h w) c'), (proj_coors_one, proj_coors_two))
+        pdist = nn.PairwiseDistance(p = 2)
+
+        num_pixels = proj_coors_one.shape[0]
+        proj_coors_one_expanded = proj_coors_one[None, :].expand(num_pixels, num_pixels, -1).reshape(num_pixels * num_pixels, 2)
+        proj_coors_two_expanded = proj_coors_two[:, None].expand(num_pixels, num_pixels, -1).reshape(num_pixels * num_pixels, 2)
+        distance_matrix = pdist(proj_coors_one_expanded, proj_coors_two_expanded)
+        distance_matrix = distance_matrix.reshape(num_pixels, num_pixels)
+
+        positive_mask_one_two = distance_matrix < self.distance_thres
+        positive_mask_two_one = positive_mask_one_two.t()
+
         with torch.no_grad():
             target_encoder = self._get_target_encoder()
             target_proj_one = target_encoder(image_one_cutout)
@@ -274,4 +313,38 @@ class PixelCL(nn.Module):
         propagated_pixels_one = self.propagate_pixels(proj_one)
         propagated_pixels_two = self.propagate_pixels(proj_two)
 
-        return torch.tensor(0., requires_grad=True)
+        # calculate similarities
+
+        proj_one, proj_two, target_proj_one, target_proj_two, propagated_pixels_one, propagated_pixels_two = list(map(lambda t: rearrange(t, 'b c h w -> b c (h w)'), (proj_one, proj_two, target_proj_one, target_proj_two, propagated_pixels_one, propagated_pixels_two)))
+
+        similarity_one_two = F.cosine_similarity(proj_one[..., :, None], target_proj_two[..., None, :], dim = 1) / self.similarity_temperature
+        similarity_two_one = F.cosine_similarity(proj_two[..., :, None], target_proj_one[..., None, :], dim = 1) / self.similarity_temperature
+
+        propagated_similarity_one_two = F.cosine_similarity(propagated_pixels_one[..., :, None], target_proj_two[..., None, :], dim = 1)
+        propagated_similarity_two_one = F.cosine_similarity(propagated_pixels_two[..., :, None], target_proj_one[..., None, :], dim = 1)
+
+        # calculate pixel contrastive loss
+
+        loss_pix_one_two = -torch.log(
+            similarity_one_two.masked_select(positive_mask_one_two[None, ...]).exp().sum() / 
+            similarity_one_two.exp().sum()
+        )
+
+        loss_pix_two_one = -torch.log(
+            similarity_two_one.masked_select(positive_mask_two_one[None, ...]).exp().sum() / 
+            similarity_two_one.exp().sum()
+        )
+
+        loss_pix = (loss_pix_one_two + loss_pix_two_one) / 2
+
+        # calculate pixel propagation loss
+
+        loss_pixpro_one_two = - propagated_similarity_one_two.masked_select(positive_mask_one_two[None, ...]).mean()
+        loss_pixpro_two_one = - propagated_similarity_two_one.masked_select(positive_mask_two_one[None, ...]).mean()
+
+        loss_pixpro = (loss_pixpro_one_two + loss_pixpro_two_one) / 2
+
+        # total loss
+
+        loss = loss_pix * self.alpha * loss_pixpro
+        return loss

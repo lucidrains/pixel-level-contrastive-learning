@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'pixel-level-contrastive-learning',
   packages = find_packages(),
-  version = '0.0.1',
+  version = '0.0.2',
   license='MIT',
   description = 'Pixel-Level Contrastive Learning',
   author = 'Phil Wang',
@@ -11,6 +11,7 @@ setup(
   url = 'https://github.com/lucidrains/pixel-level-contrastive-learning',
   keywords = ['self-supervised learning', 'artificial intelligence'],
   install_requires=[
+      'einops',
       'torch>=1.6',
       'kornia>=0.4.0'
   ],
