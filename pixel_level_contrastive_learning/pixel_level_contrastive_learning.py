@@ -216,14 +216,11 @@ class PixelCL(nn.Module):
     ):
         super().__init__()
 
-        # default SimCLR augmentation
-
         DEFAULT_AUG = nn.Sequential(
             RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
             augs.RandomGrayscale(p=0.2),
-            augs.RandomHorizontalFlip(),
             RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
-            augs.RandomResizedCrop((image_size, image_size)),
+            augs.RandomSolarize(p=0.5),
             augs.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
         )
 
@@ -268,13 +265,14 @@ class PixelCL(nn.Module):
 
     def forward(self, x):
         shape, device = x.shape, x.device
-        image_one, image_two = self.augment1(x), self.augment2(x)
 
         cutout_coordinates_one, _ = cutout_coordinates(x)
         cutout_coordinates_two, _ = cutout_coordinates(x)
 
-        image_one_cutout = cutout_and_resize(image_one, cutout_coordinates_one)
-        image_two_cutout = cutout_and_resize(image_two, cutout_coordinates_two)
+        image_one_cutout = cutout_and_resize(x, cutout_coordinates_one)
+        image_two_cutout = cutout_and_resize(x, cutout_coordinates_two)
+
+        image_one_cutout, image_two_cutout = self.augment1(image_one_cutout), self.augment2(image_two_cutout)
 
         proj_one = self.online_encoder(image_one_cutout)
         proj_two = self.online_encoder(image_two_cutout)
