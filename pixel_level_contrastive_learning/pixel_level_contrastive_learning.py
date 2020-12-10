@@ -346,5 +346,5 @@ class PixelCL(nn.Module):
 
         # total loss
 
-        loss = loss_pix * self.alpha * loss_pixpro
+        loss = loss_pix * self.alpha + loss_pixpro
         return loss
