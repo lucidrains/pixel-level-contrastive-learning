@@ -15,8 +15,14 @@ from einops import rearrange
 
 # helper functions
 
+def identity(t):
+    return t
+
 def default(val, def_val):
     return def_val if val is None else val
+
+def rand_true(prob):
+    return random.random() < prob
 
 def singleton(cache_key):
     def inner_fn(fn):
@@ -207,6 +213,7 @@ class PixelCL(nn.Module):
         projection_hidden_size = 2048,
         augment_fn = None,
         augment_fn2 = None,
+        prob_rand_hflip = 0.25,
         moving_average_decay = 0.99,
         ppm_num_layers = 1,
         ppm_gamma = 2,
@@ -226,6 +233,7 @@ class PixelCL(nn.Module):
 
         self.augment1 = default(augment_fn, DEFAULT_AUG)
         self.augment2 = default(augment_fn2, self.augment1)
+        self.prob_rand_hflip = prob_rand_hflip
 
         self.online_encoder = NetWrapper(net, projection_size, projection_hidden_size, layer=hidden_layer)
 
@@ -264,13 +272,22 @@ class PixelCL(nn.Module):
         update_moving_average(self.target_ema_updater, self.target_encoder, self.online_encoder)
 
     def forward(self, x):
-        shape, device = x.shape, x.device
+        shape, device, prob_flip = x.shape, x.device, self.prob_rand_hflip
+
+        rand_flip_fn = lambda t: torch.flip(t, dims = (-1,))
+
+        flip_image_one, flip_image_two = rand_true(prob_flip), rand_true(prob_flip)
+        flip_image_one_fn = rand_flip_fn if flip_image_one else identity
+        flip_image_two_fn = rand_flip_fn if flip_image_two else identity
 
         cutout_coordinates_one, _ = cutout_coordinates(x)
         cutout_coordinates_two, _ = cutout_coordinates(x)
 
         image_one_cutout = cutout_and_resize(x, cutout_coordinates_one)
         image_two_cutout = cutout_and_resize(x, cutout_coordinates_two)
+
+        image_one_cutout = flip_image_one_fn(image_one_cutout)
+        image_two_cutout = flip_image_two_fn(image_two_cutout)
 
         image_one_cutout, image_two_cutout = self.augment1(image_one_cutout), self.augment2(image_two_cutout)
 
@@ -290,6 +307,9 @@ class PixelCL(nn.Module):
 
         proj_coors_one = cutout_and_resize(coordinates, cutout_coordinates_one, output_size = proj_image_shape)
         proj_coors_two = cutout_and_resize(coordinates, cutout_coordinates_two, output_size = proj_image_shape)
+
+        proj_coors_one = flip_image_one_fn(proj_coors_one)
+        proj_coors_two = flip_image_two_fn(proj_coors_two)
 
         proj_coors_one, proj_coors_two = map(lambda t: rearrange(t, 'b c h w -> (b h w) c'), (proj_coors_one, proj_coors_two))
         pdist = nn.PairwiseDistance(p = 2)
