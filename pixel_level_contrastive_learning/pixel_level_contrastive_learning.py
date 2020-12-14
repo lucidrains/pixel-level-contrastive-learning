@@ -217,7 +217,7 @@ class PixelCL(nn.Module):
         moving_average_decay = 0.99,
         ppm_num_layers = 1,
         ppm_gamma = 2,
-        distance_thres = 0.1, # the paper uses 0.7, but that leads to nearly all positive hits. need clarification on how the coordinates are normalized before distance calculation.
+        distance_thres = 0.7,
         similarity_temperature = 0.3,
         alpha = 1.
     ):
@@ -295,7 +295,9 @@ class PixelCL(nn.Module):
         proj_two = self.online_encoder(image_two_cutout)
 
         image_h, image_w = shape[2:]
+
         proj_image_shape = proj_one.shape[2:]
+        proj_image_h, proj_image_w = proj_image_shape
 
         coordinates = torch.meshgrid(
             torch.arange(image_h, device = device),
@@ -304,6 +306,8 @@ class PixelCL(nn.Module):
 
         coordinates = torch.stack(coordinates).unsqueeze(0).float()
         coordinates /= math.sqrt(image_h ** 2 + image_w ** 2)
+        coordinates[:, 0] *= proj_image_h
+        coordinates[:, 1] *= proj_image_w
 
         proj_coors_one = cutout_and_resize(coordinates, cutout_coordinates_one, output_size = proj_image_shape)
         proj_coors_two = cutout_and_resize(coordinates, cutout_coordinates_two, output_size = proj_image_shape)
@@ -364,5 +368,7 @@ class PixelCL(nn.Module):
 
         # total loss
 
+        positive_pixel_pairs = positive_mask_one_two.sum()
         loss = loss_pix * self.alpha + loss_pixpro
-        return loss
+
+        return loss, positive_pixel_pairs
