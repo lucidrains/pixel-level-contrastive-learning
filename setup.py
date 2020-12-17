@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'pixel-level-contrastive-learning',
   packages = find_packages(),
-  version = '0.0.6',
+  version = '0.0.8',
   license='MIT',
   description = 'Pixel-Level Contrastive Learning',
   author = 'Phil Wang',

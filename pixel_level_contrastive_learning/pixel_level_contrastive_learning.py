@@ -1,7 +1,7 @@
 import math
 import copy
 import random
-from functools import wraps
+from functools import wraps, partial
 from math import floor
 
 import torch
@@ -91,9 +91,29 @@ def update_moving_average(ema_updater, ma_model, current_model):
         old_weight, up_weight = ma_params.data, current_params.data
         ma_params.data = ema_updater.update_average(old_weight, up_weight)
 
+# loss fn
+
+def loss_fn(x, y):
+    x = F.normalize(x, dim=-1, p=2)
+    y = F.normalize(y, dim=-1, p=2)
+    return 2 - 2 * (x * y).sum(dim=-1)
+
 # classes
 
 class MLP(nn.Module):
+    def __init__(self, chan, chan_out = 256, inner_dim = 2048):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(chan, inner_dim),
+            nn.BatchNorm1d(inner_dim),
+            nn.ReLU(),
+            nn.Linear(inner_dim, chan_out)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class ConvMLP(nn.Module):
     def __init__(self, chan, chan_out = 256, inner_dim = 2048):
         super().__init__()
         self.net = nn.Sequential(
@@ -144,62 +164,88 @@ class PPM(nn.Module):
 # and pipe it into the projecter and predictor nets
 
 class NetWrapper(nn.Module):
-    def __init__(self, net, projection_size, projection_hidden_size, layer = -2):
+    def __init__(
+        self,
+        *,
+        net,
+        projection_size,
+        projection_hidden_size,
+        layer_pixel = -2,
+        layer_instance = -2
+    ):
         super().__init__()
         self.net = net
-        self.layer = layer
+        self.layer_pixel = layer_pixel
+        self.layer_instance = layer_instance
 
-        self.projector = None
+        self.pixel_projector = None
+        self.instance_projector = None
+
         self.projection_size = projection_size
         self.projection_hidden_size = projection_hidden_size
 
-        self.hidden = None
-        self.hidden_shape = None
+        self.hidden_pixel = None
+        self.hidden_instance = None
         self.hook_registered = False
 
-    def _find_layer(self):
-        if type(self.layer) == str:
+    def _find_layer(self, layer_id):
+        if type(layer_id) == str:
             modules = dict([*self.net.named_modules()])
-            return modules.get(self.layer, None)
-        elif type(self.layer) == int:
+            return modules.get(layer_id, None)
+        elif type(layer_id) == int:
             children = [*self.net.children()]
-            return children[self.layer]
+            return children[layer_id]
         return None
 
-    def _hook(self, _, __, output):
-        self.hidden = output
-        self.hidden_shape = output.shape
+    def _hook(self, attr_name, _, __, output):
+        setattr(self, attr_name, output)
 
     def _register_hook(self):
-        layer = self._find_layer()
-        assert layer is not None, f'hidden layer ({self.layer}) not found'
-        handle = layer.register_forward_hook(self._hook)
+        pixel_layer = self._find_layer(self.layer_pixel)
+        instance_layer = self._find_layer(self.layer_instance)
+
+        assert pixel_layer is not None, f'hidden layer ({self.layer_pixel}) not found'
+        assert instance_layer is not None, f'hidden layer ({self.layer_instance}) not found'
+
+        pixel_layer.register_forward_hook(partial(self._hook, 'hidden_pixel'))
+        instance_layer.register_forward_hook(partial(self._hook, 'hidden_instance'))
         self.hook_registered = True
 
-    @singleton('projector')
-    def _get_projector(self, hidden):
+    @singleton('pixel_projector')
+    def _get_pixel_projector(self, hidden):
         _, dim, *_ = hidden.shape
+        projector = ConvMLP(dim, self.projection_size, self.projection_hidden_size)
+        return projector.to(hidden)
+
+    @singleton('instance_projector')
+    def _get_instance_projector(self, hidden):
+        _, dim = hidden.shape
         projector = MLP(dim, self.projection_size, self.projection_hidden_size)
         return projector.to(hidden)
 
     def get_representation(self, x):
-        if self.layer == -1:
-            return self.net(x)
-
         if not self.hook_registered:
             self._register_hook()
 
         _ = self.net(x)
-        hidden = self.hidden
-        self.hidden = None
-        assert hidden is not None, f'hidden layer {self.layer} never emitted an output'
-        return hidden
+        hidden_pixel = self.hidden_pixel
+        hidden_instance = self.hidden_instance
+        self.hidden_pixel = None
+        self.hidden_instance = None
+        assert hidden_pixel is not None, f'hidden pixel layer {self.layer_pixel} never emitted an output'
+        assert hidden_instance is not None, f'hidden instance layer {self.layer_instance} never emitted an output'
+        return hidden_pixel, hidden_instance
 
     def forward(self, x):
-        representation = self.get_representation(x)
-        projector = self._get_projector(representation)
-        projection = projector(representation)
-        return projection
+        pixel_representation, instance_representation = self.get_representation(x)
+        instance_representation = instance_representation.flatten(1)
+
+        pixel_projector = self._get_pixel_projector(pixel_representation)
+        instance_projector = self._get_instance_projector(instance_representation)
+
+        pixel_projection = pixel_projector(pixel_representation)
+        instance_projection = instance_projector(instance_representation)
+        return pixel_projection, instance_projection
 
 # main class
 
@@ -208,7 +254,8 @@ class PixelCL(nn.Module):
         self,
         net,
         image_size,
-        hidden_layer = -2,
+        hidden_layer_pixel = -2,
+        hidden_layer_instance = -2,
         projection_size = 256,
         projection_hidden_size = 2048,
         augment_fn = None,
@@ -219,7 +266,8 @@ class PixelCL(nn.Module):
         ppm_gamma = 2,
         distance_thres = 0.7,
         similarity_temperature = 0.3,
-        alpha = 1.
+        alpha = 1.,
+        use_pixpro = True
     ):
         super().__init__()
 
@@ -235,7 +283,13 @@ class PixelCL(nn.Module):
         self.augment2 = default(augment_fn2, self.augment1)
         self.prob_rand_hflip = prob_rand_hflip
 
-        self.online_encoder = NetWrapper(net, projection_size, projection_hidden_size, layer=hidden_layer)
+        self.online_encoder = NetWrapper(
+            net = net,
+            projection_size = projection_size,
+            projection_hidden_size = projection_hidden_size,
+            layer_pixel = hidden_layer_pixel,
+            layer_instance = hidden_layer_instance
+        )
 
         self.target_encoder = None
         self.target_ema_updater = EMA(moving_average_decay)
@@ -244,11 +298,17 @@ class PixelCL(nn.Module):
         self.similarity_temperature = similarity_temperature
         self.alpha = alpha
 
-        self.propagate_pixels = PPM(
-            chan = projection_size,
-            num_layers = ppm_num_layers,
-            gamma = ppm_gamma
-        )
+        self.use_pixpro = use_pixpro
+
+        if use_pixpro:
+            self.propagate_pixels = PPM(
+                chan = projection_size,
+                num_layers = ppm_num_layers,
+                gamma = ppm_gamma
+            )
+
+        # instance level predictor
+        self.online_predictor = MLP(projection_size, projection_size, projection_hidden_size)
 
         # get device of network and make wrapper same device
         device = get_module_device(net)
@@ -291,12 +351,12 @@ class PixelCL(nn.Module):
 
         image_one_cutout, image_two_cutout = self.augment1(image_one_cutout), self.augment2(image_two_cutout)
 
-        proj_one = self.online_encoder(image_one_cutout)
-        proj_two = self.online_encoder(image_two_cutout)
+        proj_pixel_one, proj_instance_one = self.online_encoder(image_one_cutout)
+        proj_pixel_two, proj_instance_two = self.online_encoder(image_two_cutout)
 
         image_h, image_w = shape[2:]
 
-        proj_image_shape = proj_one.shape[2:]
+        proj_image_shape = proj_pixel_one.shape[2:]
         proj_image_h, proj_image_w = proj_image_shape
 
         coordinates = torch.meshgrid(
@@ -329,46 +389,65 @@ class PixelCL(nn.Module):
 
         with torch.no_grad():
             target_encoder = self._get_target_encoder()
-            target_proj_one = target_encoder(image_one_cutout)
-            target_proj_two = target_encoder(image_two_cutout)
+            target_proj_pixel_one, target_proj_instance_one = target_encoder(image_one_cutout)
+            target_proj_pixel_two, target_proj_instance_two = target_encoder(image_two_cutout)
 
-        propagated_pixels_one = self.propagate_pixels(proj_one)
-        propagated_pixels_two = self.propagate_pixels(proj_two)
+        # flatten all the pixel projections
 
-        # calculate similarities
+        flatten = lambda t: rearrange(t, 'b c h w -> b c (h w)')
 
-        proj_one, proj_two, target_proj_one, target_proj_two, propagated_pixels_one, propagated_pixels_two = list(map(lambda t: rearrange(t, 'b c h w -> b c (h w)'), (proj_one, proj_two, target_proj_one, target_proj_two, propagated_pixels_one, propagated_pixels_two)))
+        target_proj_pixel_one, target_proj_pixel_two = list(map(flatten, (target_proj_pixel_one, target_proj_pixel_two)))
 
-        similarity_one_two = F.cosine_similarity(proj_one[..., :, None], target_proj_two[..., None, :], dim = 1) / self.similarity_temperature
-        similarity_two_one = F.cosine_similarity(proj_two[..., :, None], target_proj_one[..., None, :], dim = 1) / self.similarity_temperature
+        # get total number of positive pixel pairs
 
-        propagated_similarity_one_two = F.cosine_similarity(propagated_pixels_one[..., :, None], target_proj_two[..., None, :], dim = 1)
-        propagated_similarity_two_one = F.cosine_similarity(propagated_pixels_two[..., :, None], target_proj_one[..., None, :], dim = 1)
+        positive_pixel_pairs = positive_mask_one_two.sum()
 
-        # calculate pixel contrastive loss
+        if not self.use_pixpro:
+            # calculate pix contrast loss
 
-        loss_pix_one_two = -torch.log(
-            similarity_one_two.masked_select(positive_mask_one_two[None, ...]).exp().sum() / 
-            similarity_one_two.exp().sum()
-        )
+            proj_pixel_one, proj_pixel_two = list(map(flatten, (proj_pixel_one, proj_pixel_two)))
 
-        loss_pix_two_one = -torch.log(
-            similarity_two_one.masked_select(positive_mask_two_one[None, ...]).exp().sum() / 
-            similarity_two_one.exp().sum()
-        )
+            similarity_one_two = F.cosine_similarity(proj_pixel_one[..., :, None], target_proj_pixel_two[..., None, :], dim = 1) / self.similarity_temperature
+            similarity_two_one = F.cosine_similarity(proj_pixel_two[..., :, None], target_proj_pixel_one[..., None, :], dim = 1) / self.similarity_temperature
 
-        loss_pix = (loss_pix_one_two + loss_pix_two_one) / 2
+            loss_pix_one_two = -torch.log(
+                similarity_one_two.masked_select(positive_mask_one_two[None, ...]).exp().sum() / 
+                similarity_one_two.exp().sum()
+            )
 
-        # calculate pixel propagation loss
+            loss_pix_two_one = -torch.log(
+                similarity_two_one.masked_select(positive_mask_two_one[None, ...]).exp().sum() / 
+                similarity_two_one.exp().sum()
+            )
 
-        loss_pixpro_one_two = - propagated_similarity_one_two.masked_select(positive_mask_one_two[None, ...]).mean()
-        loss_pixpro_two_one = - propagated_similarity_two_one.masked_select(positive_mask_two_one[None, ...]).mean()
+            pix_loss = (loss_pix_one_two + loss_pix_two_one) / 2
+        else:
+            # calculate pix pro loss
 
-        loss_pixpro = (loss_pixpro_one_two + loss_pixpro_two_one) / 2
+            propagated_pixels_one = self.propagate_pixels(proj_pixel_one)
+            propagated_pixels_two = self.propagate_pixels(proj_pixel_two)
+
+            propagated_pixels_one, propagated_pixels_two = list(map(flatten, (propagated_pixels_one, propagated_pixels_two)))
+
+            propagated_similarity_one_two = F.cosine_similarity(propagated_pixels_one[..., :, None], target_proj_pixel_two[..., None, :], dim = 1)
+            propagated_similarity_two_one = F.cosine_similarity(propagated_pixels_two[..., :, None], target_proj_pixel_one[..., None, :], dim = 1)
+
+            loss_pixpro_one_two = - propagated_similarity_one_two.masked_select(positive_mask_one_two[None, ...]).mean()
+            loss_pixpro_two_one = - propagated_similarity_two_one.masked_select(positive_mask_two_one[None, ...]).mean()
+
+            pix_loss = (loss_pixpro_one_two + loss_pixpro_two_one) / 2
+
+        # get instance level loss
+
+        pred_instance_one = self.online_predictor(proj_instance_one)
+        pred_instance_two = self.online_predictor(proj_instance_two)
+
+        loss_instance_one = loss_fn(pred_instance_one, target_proj_instance_two.detach())
+        loss_instance_two = loss_fn(pred_instance_two, target_proj_instance_one.detach())
+
+        instance_loss = (loss_instance_one + loss_instance_two).mean()
 
         # total loss
 
-        positive_pixel_pairs = positive_mask_one_two.sum()
-        loss = loss_pix * self.alpha + loss_pixpro
-
+        loss = pix_loss * self.alpha + instance_loss
         return loss, positive_pixel_pairs
