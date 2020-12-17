@@ -38,7 +38,8 @@ learner = PixelCL(
     distance_thres = 0.7,           # ideal value is 0.7, as indicated in the paper, which makes the assumption of each feature map's pixel diagonal distance to be 1 (still unclear)
     similarity_temperature = 0.3,   # temperature for the cosine similarity for the pixel contrastive loss
     alpha = 1.,                      # weight of the pixel propagation loss (pixpro) vs pixel CL loss
-    use_pixpro = True                # do pixel pro instead of pixel contrast loss, defaults to pixpro, since it is the best one
+    use_pixpro = True,               # do pixel pro instead of pixel contrast loss, defaults to pixpro, since it is the best one
+    cutout_ratio_range = (0.6, 0.8)  # a random ratio is selected from this range for the random cutout
 ).cuda()
 
 opt = torch.optim.Adam(learner.parameters(), lr=1e-4)
@@ -49,12 +50,7 @@ def sample_batch_images():
 for _ in tqdm(range(100000)):
     images = sample_batch_images()
     loss, positive_pixel_pairs = learner(images)
-
-    # only update if there are positive pixel pairs
-    # as defined by distance threshold
-    # still needs further review https://github.com/lucidrains/pixel-level-contrastive-learning/issues/1
-    if positive_pixel_pairs == 0:
-        continue
+    # if positive pixel pairs is equal to zero, the loss is equal to the instance level loss
 
     opt.zero_grad()
     loss.backward()

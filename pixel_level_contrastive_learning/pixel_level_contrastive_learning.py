@@ -45,7 +45,7 @@ def set_requires_grad(model, val):
     for p in model.parameters():
         p.requires_grad = val
 
-def cutout_coordinates(image, ratio_range = (0.5, 0.7)):
+def cutout_coordinates(image, ratio_range = (0.6, 0.8)):
     _, _, orig_h, orig_w = image.shape
 
     ratio_lo, ratio_hi = ratio_range
@@ -267,7 +267,8 @@ class PixelCL(nn.Module):
         distance_thres = 0.7,
         similarity_temperature = 0.3,
         alpha = 1.,
-        use_pixpro = True
+        use_pixpro = True,
+        cutout_ratio_range = (0.6, 0.8)
     ):
         super().__init__()
 
@@ -307,6 +308,8 @@ class PixelCL(nn.Module):
                 gamma = ppm_gamma
             )
 
+        self.cutout_ratio_range = cutout_ratio_range
+
         # instance level predictor
         self.online_predictor = MLP(projection_size, projection_size, projection_hidden_size)
 
@@ -340,8 +343,8 @@ class PixelCL(nn.Module):
         flip_image_one_fn = rand_flip_fn if flip_image_one else identity
         flip_image_two_fn = rand_flip_fn if flip_image_two else identity
 
-        cutout_coordinates_one, _ = cutout_coordinates(x)
-        cutout_coordinates_two, _ = cutout_coordinates(x)
+        cutout_coordinates_one, _ = cutout_coordinates(x, self.cutout_ratio_range)
+        cutout_coordinates_two, _ = cutout_coordinates(x, self.cutout_ratio_range)
 
         image_one_cutout = cutout_and_resize(x, cutout_coordinates_one)
         image_two_cutout = cutout_and_resize(x, cutout_coordinates_two)
@@ -402,6 +405,19 @@ class PixelCL(nn.Module):
 
         positive_pixel_pairs = positive_mask_one_two.sum()
 
+        # get instance level loss
+
+        pred_instance_one = self.online_predictor(proj_instance_one)
+        pred_instance_two = self.online_predictor(proj_instance_two)
+
+        loss_instance_one = loss_fn(pred_instance_one, target_proj_instance_two.detach())
+        loss_instance_two = loss_fn(pred_instance_two, target_proj_instance_one.detach())
+
+        instance_loss = (loss_instance_one + loss_instance_two).mean()
+
+        if positive_pixel_pairs == 0:
+            return instance_loss, 0
+
         if not self.use_pixpro:
             # calculate pix contrast loss
 
@@ -436,16 +452,6 @@ class PixelCL(nn.Module):
             loss_pixpro_two_one = - propagated_similarity_two_one.masked_select(positive_mask_two_one[None, ...]).mean()
 
             pix_loss = (loss_pixpro_one_two + loss_pixpro_two_one) / 2
-
-        # get instance level loss
-
-        pred_instance_one = self.online_predictor(proj_instance_one)
-        pred_instance_two = self.online_predictor(proj_instance_two)
-
-        loss_instance_one = loss_fn(pred_instance_one, target_proj_instance_two.detach())
-        loss_instance_two = loss_fn(pred_instance_two, target_proj_instance_one.detach())
-
-        instance_loss = (loss_instance_one + loss_instance_two).mean()
 
         # total loss
 
