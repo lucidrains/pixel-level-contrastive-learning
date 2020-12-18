@@ -55,12 +55,12 @@ def cutout_coordinates(image, ratio_range = (0.6, 0.8)):
     coor_y = floor((orig_h - h) * random.random())
     return ((coor_y, coor_y + h), (coor_x, coor_x + w)), random_ratio
 
-def cutout_and_resize(image, coordinates, output_size = None):
+def cutout_and_resize(image, coordinates, output_size = None, mode = 'nearest'):
     shape = image.shape
     output_size = default(output_size, shape[2:])
     (y0, y1), (x0, x1) = coordinates
     cutout_image = image[:, :, y0:y1, x0:x1]
-    return F.interpolate(cutout_image, size = output_size)
+    return F.interpolate(cutout_image, size = output_size, mode = mode)
 
 # augmentation utils
 
@@ -268,7 +268,9 @@ class PixelCL(nn.Module):
         similarity_temperature = 0.3,
         alpha = 1.,
         use_pixpro = True,
-        cutout_ratio_range = (0.6, 0.8)
+        cutout_ratio_range = (0.6, 0.8),
+        cutout_interpolate_mode = 'nearest',
+        coord_cutout_interpolate_mode = 'bilinear'
     ):
         super().__init__()
 
@@ -309,6 +311,8 @@ class PixelCL(nn.Module):
             )
 
         self.cutout_ratio_range = cutout_ratio_range
+        self.cutout_interpolate_mode = cutout_interpolate_mode
+        self.coord_cutout_interpolate_mode = coord_cutout_interpolate_mode
 
         # instance level predictor
         self.online_predictor = MLP(projection_size, projection_size, projection_hidden_size)
@@ -346,8 +350,8 @@ class PixelCL(nn.Module):
         cutout_coordinates_one, _ = cutout_coordinates(x, self.cutout_ratio_range)
         cutout_coordinates_two, _ = cutout_coordinates(x, self.cutout_ratio_range)
 
-        image_one_cutout = cutout_and_resize(x, cutout_coordinates_one)
-        image_two_cutout = cutout_and_resize(x, cutout_coordinates_two)
+        image_one_cutout = cutout_and_resize(x, cutout_coordinates_one, mode = self.cutout_interpolate_mode)
+        image_two_cutout = cutout_and_resize(x, cutout_coordinates_two, mode = self.cutout_interpolate_mode)
 
         image_one_cutout = flip_image_one_fn(image_one_cutout)
         image_two_cutout = flip_image_two_fn(image_two_cutout)
@@ -372,8 +376,8 @@ class PixelCL(nn.Module):
         coordinates[:, 0] *= proj_image_h
         coordinates[:, 1] *= proj_image_w
 
-        proj_coors_one = cutout_and_resize(coordinates, cutout_coordinates_one, output_size = proj_image_shape)
-        proj_coors_two = cutout_and_resize(coordinates, cutout_coordinates_two, output_size = proj_image_shape)
+        proj_coors_one = cutout_and_resize(coordinates, cutout_coordinates_one, output_size = proj_image_shape, mode = self.coord_cutout_interpolate_mode)
+        proj_coors_two = cutout_and_resize(coordinates, cutout_coordinates_two, output_size = proj_image_shape, mode = self.coord_cutout_interpolate_mode)
 
         proj_coors_one = flip_image_one_fn(proj_coors_one)
         proj_coors_two = flip_image_two_fn(proj_coors_two)
