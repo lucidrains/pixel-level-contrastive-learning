@@ -386,8 +386,10 @@ class PixelCL(nn.Module):
         pdist = nn.PairwiseDistance(p = 2)
 
         num_pixels = proj_coors_one.shape[0]
-        proj_coors_one_expanded = proj_coors_one[None, :].expand(num_pixels, num_pixels, -1).reshape(num_pixels * num_pixels, 2)
-        proj_coors_two_expanded = proj_coors_two[:, None].expand(num_pixels, num_pixels, -1).reshape(num_pixels * num_pixels, 2)
+
+        proj_coors_one_expanded = proj_coors_one[:, None].expand(num_pixels, num_pixels, -1).reshape(num_pixels * num_pixels, 2)
+        proj_coors_two_expanded = proj_coors_two[None, :].expand(num_pixels, num_pixels, -1).reshape(num_pixels * num_pixels, 2)
+
         distance_matrix = pdist(proj_coors_one_expanded, proj_coors_two_expanded)
         distance_matrix = distance_matrix.reshape(num_pixels, num_pixels)
 
