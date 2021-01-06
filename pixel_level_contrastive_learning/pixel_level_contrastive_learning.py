@@ -12,6 +12,7 @@ from kornia import augmentation as augs
 from kornia import filters, color
 
 from einops import rearrange
+from pykeops.torch import LazyTensor
 
 # helper functions
 
@@ -156,7 +157,16 @@ class PPM(nn.Module):
         similarity = F.relu(F.cosine_similarity(xi, xj, dim = 1)) ** self.gamma
 
         transform_out = self.transform_net(x)
-        out = einsum('b x y h w, b c h w -> b c x y', similarity, transform_out)
+
+        b, x, y, h, w = similarity.shape
+        similarity = rearrange(similarity, 'b x y h w -> b (x y) (h w)')
+        transform_out = rearrange(transform_out, 'b c h w -> b c (h w)')
+
+        similarity = LazyTensor(similarity[:, None, :, :])
+        transform_out = LazyTensor(transform_out[:, :, None, :])
+        out = (similarity * transform_out).sum(dim = -1)
+
+        out = rearrange(out, 'b c (x y) -> b c x y', x = x, y = y)
         return out
 
 # a wrapper class for the base neural network

@@ -13,7 +13,8 @@ setup(
   install_requires=[
       'einops',
       'torch>=1.6',
-      'kornia>=0.4.0'
+      'kornia>=0.4.0',
+      'pykeops'
   ],
   classifiers=[
       'Development Status :: 4 - Beta',
