@@ -152,9 +152,11 @@ class PPM(nn.Module):
             raise ValueError('num_layers must be one of 0, 1, or 2')
 
     def forward(self, x):
-        xi = x[:, :, :, :, None, None]
-        xj = x[:, :, None, None, :, :]
-        similarity = F.relu(F.cosine_similarity(xi, xj, dim = 1)) ** self.gamma
+        x_normed = F.normalize(x, dim = 1)
+
+        xi = LazyTensor(x_normed[:, :, :, :, None, None])
+        xj = LazyTensor(x_normed[:, :, None, None, :, :])
+        similarity = F.relu((xi * xj).sum(dim = 1)) ** self.gamma
 
         transform_out = self.transform_net(x)
 
