@@ -273,7 +273,8 @@ class PixelCL(nn.Module):
         use_pixpro = True,
         cutout_ratio_range = (0.6, 0.8),
         cutout_interpolate_mode = 'nearest',
-        coord_cutout_interpolate_mode = 'bilinear'
+        coord_cutout_interpolate_mode = 'bilinear',
+        return_positive_pairs = False
     ):
         super().__init__()
 
@@ -425,7 +426,10 @@ class PixelCL(nn.Module):
         instance_loss = (loss_instance_one + loss_instance_two).mean()
 
         if positive_pixel_pairs == 0:
-            return instance_loss, 0
+            if return_positive_pairs:
+                return instance_loss, 0
+            else:
+                return instance_loss
 
         if not self.use_pixpro:
             # calculate pix contrast loss
@@ -465,4 +469,8 @@ class PixelCL(nn.Module):
         # total loss
 
         loss = pix_loss * self.alpha + instance_loss
-        return loss, positive_pixel_pairs
+
+        if return_positive_pairs:
+            return loss, positive_pixel_pairs
+        else:
+            return loss
