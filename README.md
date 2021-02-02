@@ -47,8 +47,7 @@ def sample_batch_images():
 
 for _ in tqdm(range(100000)):
     images = sample_batch_images()
-    loss, positive_pixel_pairs = learner(images)
-    # if positive pixel pairs is equal to zero, the loss is equal to the instance level loss
+    loss = learner(images) # if positive pixel pairs is equal to zero, the loss is equal to the instance level loss
 
     opt.zero_grad()
     loss.backward()
@@ -60,6 +59,11 @@ for _ in tqdm(range(100000)):
 torch.save(resnet, 'improved-resnet.pt')
 ```
 
+You can also return the number of positive pixel pairs on `forward`, for logging or other purposes
+
+```python
+loss, positive_pairs = learner(images, return_positive_pairs = True)
+```
 ## Citations
 
 ```bibtex

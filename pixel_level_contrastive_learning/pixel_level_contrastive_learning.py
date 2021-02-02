@@ -341,7 +341,7 @@ class PixelCL(nn.Module):
         assert self.target_encoder is not None, 'target encoder has not been created yet'
         update_moving_average(self.target_ema_updater, self.target_encoder, self.online_encoder)
 
-    def forward(self, x):
+    def forward(self, x, return_positive_pairs = False):
         shape, device, prob_flip = x.shape, x.device, self.prob_rand_hflip
 
         rand_flip_fn = lambda t: torch.flip(t, dims = (-1,))
@@ -425,7 +425,8 @@ class PixelCL(nn.Module):
         instance_loss = (loss_instance_one + loss_instance_two).mean()
 
         if positive_pixel_pairs == 0:
-            return instance_loss, 0
+            ret = (instance_loss, 0) if return_positive_pairs else instance_loss
+            return ret
 
         if not self.use_pixpro:
             # calculate pix contrast loss
@@ -465,4 +466,6 @@ class PixelCL(nn.Module):
         # total loss
 
         loss = pix_loss * self.alpha + instance_loss
-        return loss, positive_pixel_pairs
+
+        ret = (loss, positive_pixel_pairs) if return_positive_pairs else loss
+        return ret
