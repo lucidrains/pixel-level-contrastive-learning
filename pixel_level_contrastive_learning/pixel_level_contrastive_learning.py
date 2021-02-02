@@ -197,8 +197,11 @@ class NetWrapper(nn.Module):
             return children[layer_id]
         return None
 
-    def _hook(self, attr_name, _, __, output):
-        setattr(self, attr_name, output)
+    def _hook_pixel(self, _, __, output):
+        setattr(self, 'hidden_pixel', output)
+
+    def _hook_instance(self, _, __, output):
+        setattr(self, 'hidden_instance', output)
 
     def _register_hook(self):
         pixel_layer = self._find_layer(self.layer_pixel)
@@ -207,8 +210,8 @@ class NetWrapper(nn.Module):
         assert pixel_layer is not None, f'hidden layer ({self.layer_pixel}) not found'
         assert instance_layer is not None, f'hidden layer ({self.layer_instance}) not found'
 
-        pixel_layer.register_forward_hook(partial(self._hook, 'hidden_pixel'))
-        instance_layer.register_forward_hook(partial(self._hook, 'hidden_instance'))
+        pixel_layer.register_forward_hook(self._hook_pixel)
+        instance_layer.register_forward_hook(self._hook_instance)
         self.hook_registered = True
 
     @singleton('pixel_projector')
