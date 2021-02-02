@@ -306,14 +306,16 @@ class PixelCL(nn.Module):
         self.alpha = alpha
 
         self.use_pixpro = use_pixpro
-
+        
         if use_pixpro:
             self.propagate_pixels = PPM(
                 chan = projection_size,
                 num_layers = ppm_num_layers,
                 gamma = ppm_gamma
             )
-
+        
+        self.return_positive_pairs = return_positive_pairs
+        
         self.cutout_ratio_range = cutout_ratio_range
         self.cutout_interpolate_mode = cutout_interpolate_mode
         self.coord_cutout_interpolate_mode = coord_cutout_interpolate_mode
@@ -426,7 +428,7 @@ class PixelCL(nn.Module):
         instance_loss = (loss_instance_one + loss_instance_two).mean()
 
         if positive_pixel_pairs == 0:
-            if return_positive_pairs:
+            if self.return_positive_pairs:
                 return instance_loss, 0
             else:
                 return instance_loss
@@ -470,7 +472,7 @@ class PixelCL(nn.Module):
 
         loss = pix_loss * self.alpha + instance_loss
 
-        if return_positive_pairs:
+        if self.return_positive_pairs:
             return loss, positive_pixel_pairs
         else:
             return loss
